@@ -1,5 +1,3 @@
-```python
-from flask import Flask, request, Response, jsonify
 from flask_cors import CORS
 import threading
 import time
@@ -192,4 +190,3 @@ if __name__ == "__main__":
         threaded=True,
         debug=False
     )
-```
