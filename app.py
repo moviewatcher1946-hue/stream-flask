@@ -1,89 +1,174 @@
-from flask import Flask, request, Response, jsonify
+from flask import Flask, Response, jsonify
 from flask_cors import CORS
-import threading
-import time
+import requests
+import os
 
 app = Flask(__name__)
 CORS(app)
 
-latest_frame = None
-frame_lock = threading.Lock()
+# ============================================================
+# PYCHARM / YOLO HTTP STREAM EXPOSED THROUGH NGROK
+# ============================================================
 
+SOURCE_STREAM_URL = (
+    "https://breath-eatery-sequester.ngrok-free.dev/stream"
+)
+
+
+# ============================================================
+# HOME
+# ============================================================
 
 @app.route("/")
 def home():
     return jsonify({
         "status": "online",
-        "service": "Sentry Stream Server"
+        "service": "Sentry Stream Proxy",
+        "stream": "/stream"
     })
 
 
-@app.route("/frame", methods=["POST"])
-def receive_frame():
-    global latest_frame
-
-    frame = request.get_data()
-
-    if not frame:
-        return jsonify({
-            "error": "No JPEG received"
-        }), 400
-
-    with frame_lock:
-        latest_frame = frame
-
-    return jsonify({
-        "status": "received"
-    })
-
+# ============================================================
+# STREAM PROXY
+# ============================================================
 
 @app.route("/stream")
 def stream():
 
     def generate():
 
-        while True:
+        try:
 
-            with frame_lock:
-                frame = latest_frame
+            print("Connecting to YOLO stream...")
 
-            if frame is None:
-                time.sleep(0.05)
-                continue
+            with requests.get(
+                SOURCE_STREAM_URL,
+                headers={
+                    # This header is sent TO NGROK
+                    "ngrok-skip-browser-warning": "true",
 
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n"
-                b"Content-Length: "
-                + str(len(frame)).encode()
-                + b"\r\n\r\n"
-                + frame
-                + b"\r\n"
+                    # Request MJPEG
+                    "Accept": "multipart/x-mixed-replace"
+                },
+                stream=True,
+                timeout=(10, None)
+            ) as response:
+
+                print(
+                    "YOLO stream status:",
+                    response.status_code
+                )
+
+                response.raise_for_status()
+
+                # Forward the stream without modifying
+                # the JPEG frames.
+
+                for chunk in response.iter_content(
+                    chunk_size=16384
+                ):
+
+                    if chunk:
+                        yield chunk
+
+        except requests.RequestException as e:
+
+            print(
+                "Stream connection error:",
+                e
             )
-
-            time.sleep(0.03)
 
     return Response(
         generate(),
-        mimetype="multipart/x-mixed-replace; boundary=frame"
+        content_type=(
+            "multipart/x-mixed-replace; "
+            "boundary=frame"
+        ),
+        headers={
+            "Cache-Control": (
+                "no-cache, "
+                "no-store, "
+                "must-revalidate"
+            ),
+            "Pragma": "no-cache",
+            "Expires": "0",
+
+            "Access-Control-Allow-Origin": "*",
+
+            # Disable proxy buffering
+            "X-Accel-Buffering": "no"
+        }
     )
 
+
+# ============================================================
+# HEALTH CHECK
+# ============================================================
 
 @app.route("/health")
 def health():
 
-    with frame_lock:
-        has_frame = latest_frame is not None
+    try:
 
-    return jsonify({
-        "status": "online",
-        "frame_available": has_frame
-    })
+        response = requests.get(
+            SOURCE_STREAM_URL,
+            headers={
+                "ngrok-skip-browser-warning": "true"
+            },
+            stream=True,
+            timeout=5
+        )
 
+        response.close()
+
+        return jsonify({
+            "status": "online",
+            "source_status": response.status_code,
+            "source": SOURCE_STREAM_URL
+        })
+
+    except Exception as e:
+
+        return jsonify({
+            "status": "offline",
+            "error": str(e)
+        }), 503
+
+
+# ============================================================
+# RENDER
+# ============================================================
 
 if __name__ == "__main__":
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            5000
+        )
+    )
+
+    print("=" * 50)
+    print("SENTRY STREAM PROXY")
+    print("=" * 50)
+
+    print()
+    print("Source:")
+    print(SOURCE_STREAM_URL)
+
+    print()
+    print("Local endpoint:")
+    print("/stream")
+
+    print()
+    print("Port:")
+    print(port)
+
+    print("=" * 50)
+
     app.run(
         host="0.0.0.0",
-        port=5000,
-        threaded=True
+        port=port,
+        threaded=True,
+        debug=False
     )
