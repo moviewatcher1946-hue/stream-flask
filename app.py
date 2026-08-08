@@ -8,7 +8,14 @@ app = Flask(__name__)
 CORS(app)
 
 # ============================================================
-# LATEST JPEG FRAME
+# CONFIG
+# ============================================================
+
+MAX_FRAME_SIZE = 5 * 1024 * 1024  # 5 MB maximum JPEG
+
+
+# ============================================================
+# SHARED JPEG FRAME
 # ============================================================
 
 latest_frame = None
@@ -19,38 +26,87 @@ frame_lock = threading.Lock()
 # HOME
 # ============================================================
 
-@app.route("/")
+@app.get("/")
 def home():
-    return "Sentry Stream Server Running"
+    return jsonify({
+        "service": "Sentry Stream Server",
+        "status": "online",
+        "stream": "/stream",
+        "frame_upload": "/frame",
+        "health": "/health"
+    })
 
 
 # ============================================================
-# RECEIVE JPEG FROM YOLO PYTHON
+# HEALTH
 # ============================================================
 
-@app.route("/frame", methods=["POST"])
+@app.get("/health")
+def health():
+
+    with frame_lock:
+        has_frame = latest_frame is not None
+
+    return jsonify({
+        "status": "online",
+        "frame_available": has_frame
+    })
+
+
+# ============================================================
+# RECEIVE JPEG
+# ============================================================
+
+@app.post("/frame")
 def receive_frame():
 
     global latest_frame
 
-    # Your YOLO code sends:
+    # Your YOLO program sends raw JPEG bytes:
+    #
     # data=encoded.tobytes()
-    # Content-Type: image/jpeg
+    #
+    # Content-Type:
+    # image/jpeg
 
-    frame = request.get_data()
+    if request.content_type != "image/jpeg":
+
+        return jsonify({
+            "error": "Content-Type must be image/jpeg"
+        }), 415
+
+
+    # Read JPEG
+    frame = request.get_data(
+        cache=False,
+        as_text=False
+    )
+
 
     if not frame:
+
         return jsonify({
-            "error": "No JPEG received"
+            "error": "Empty JPEG"
         }), 400
 
-    # Store ONLY the newest JPEG
+
+    # Prevent accidentally uploading huge files
+    if len(frame) > MAX_FRAME_SIZE:
+
+        return jsonify({
+            "error": "JPEG too large"
+        }), 413
+
+
+    # Store only newest frame
     with frame_lock:
+
         latest_frame = frame
+
 
     return jsonify({
         "status": "received",
-        "bytes": len(frame)
+        "size": len(frame)
     })
 
 
@@ -58,43 +114,68 @@ def receive_frame():
 # MJPEG STREAM
 # ============================================================
 
-@app.route("/stream")
+@app.get("/stream")
 def stream():
 
     def generate():
 
         while True:
 
+            # Get latest JPEG
             with frame_lock:
+
                 frame = latest_frame
 
-            # Wait until YOLO sends the first frame
+
+            # No frame received yet
             if frame is None:
 
-                time.sleep(0.01)
+                time.sleep(0.05)
 
                 continue
 
-            # Send JPEG directly
+
+            # ------------------------------------------------
+            # MJPEG PART
+            # ------------------------------------------------
+
+            yield b"--frame\r\n"
+
+            yield b"Content-Type: image/jpeg\r\n"
+
             yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n"
                 b"Content-Length: "
                 + str(len(frame)).encode()
                 + b"\r\n"
-                b"Cache-Control: no-cache\r\n"
-                b"\r\n"
-                + frame
-                + b"\r\n"
             )
 
-            # Small delay to avoid hammering the connection
-            time.sleep(0.01)
+            yield b"Cache-Control: no-cache\r\n"
+
+            yield b"\r\n"
+
+            # The actual JPEG
+            yield frame
+
+            yield b"\r\n"
+
+
+            # Don't spin the CPU
+            time.sleep(0.03)
+
 
     response = Response(
         generate(),
-        mimetype="multipart/x-mixed-replace; boundary=frame"
+        status=200,
+        mimetype=(
+            "multipart/x-mixed-replace; "
+            "boundary=frame"
+        )
     )
+
+
+    # --------------------------------------------------------
+    # STREAM HEADERS
+    # --------------------------------------------------------
 
     response.headers["Cache-Control"] = (
         "no-cache, no-store, must-revalidate"
@@ -106,56 +187,22 @@ def stream():
 
     response.headers["Access-Control-Allow-Origin"] = "*"
 
-    # Tell reverse proxies not to buffer the stream
+    # Disable proxy buffering where supported
     response.headers["X-Accel-Buffering"] = "no"
+
 
     return response
 
 
 # ============================================================
-# HEALTH CHECK
-# ============================================================
-
-@app.route("/health")
-def health():
-
-    with frame_lock:
-        available = latest_frame is not None
-
-    return jsonify({
-        "status": "online",
-        "frame_available": available
-    })
-
-
-# ============================================================
-# START
+# RUN LOCALLY
 # ============================================================
 
 if __name__ == "__main__":
 
-    print("=" * 50)
-    print("SENTRY JPEG STREAM SERVER")
-    print("=" * 50)
-
-    print()
-    print("HTTP server:")
-    print("http://0.0.0.0:5000")
-
-    print()
-    print("JPEG upload:")
-    print("POST /frame")
-
-    print()
-    print("MJPEG stream:")
-    print("GET /stream")
-
-    print("=" * 50)
-
     app.run(
         host="0.0.0.0",
         port=5000,
-        threaded=True,
-        debug=False
+        threaded=True
     )
 ```
