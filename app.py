@@ -9,181 +9,116 @@ app = Flask(__name__)
 CORS(app)
 
 # ============================================================
-# SHARED FRAME
+# LATEST JPEG FRAME
 # ============================================================
 
 latest_frame = None
-
 frame_lock = threading.Lock()
-frame_updated = threading.Condition(frame_lock)
 
-frame_number = 0
+
+# ============================================================
+# ADD HEADERS
+# ============================================================
+
+@app.after_request
+def add_headers(response):
+
+    # Allow your Render static website to access the stream
+    response.headers["Access-Control-Allow-Origin"] = "*"
+
+    # Prevent caching
+    response.headers["Cache-Control"] = (
+        "no-cache, no-store, must-revalidate"
+    )
+
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+
+    return response
 
 
 # ============================================================
 # HOME
 # ============================================================
 
-@app.route("/", methods=["GET"])
+@app.route("/")
 def home():
 
     return jsonify({
-        "service": "Sentry Stream Server",
+        "service": "Sentry Stream",
         "status": "online",
         "stream": "/stream",
-        "upload": "/frame",
-        "health": "/health"
+        "upload": "/frame"
     })
 
 
 # ============================================================
-# HEALTH CHECK
-# ============================================================
-
-@app.route("/health", methods=["GET"])
-def health():
-
-    with frame_lock:
-
-        available = latest_frame is not None
-
-        current_frame = frame_number
-
-    return jsonify({
-        "status": "online",
-        "frame_available": available,
-        "frame_number": current_frame
-    })
-
-
-# ============================================================
-# RECEIVE JPEG
+# RECEIVE JPEG FROM YOLO
 # ============================================================
 
 @app.route("/frame", methods=["POST"])
 def receive_frame():
 
     global latest_frame
-    global frame_number
 
-    # --------------------------------------------------------
-    # Make sure YOLO sent JPEG
-    # --------------------------------------------------------
-
-    content_type = request.headers.get(
-        "Content-Type",
-        ""
-    ).lower()
-
-    if not content_type.startswith("image/jpeg"):
-
-        return jsonify({
-            "error": "Expected image/jpeg"
-        }), 415
-
-
-    # --------------------------------------------------------
-    # Read raw JPEG bytes
-    # --------------------------------------------------------
+    # Your YOLO program sends raw JPEG bytes:
+    #
+    # data=encoded.tobytes()
+    #
+    # Content-Type: image/jpeg
 
     frame = request.get_data(
         cache=False,
         as_text=False
     )
 
-
     if not frame:
 
         return jsonify({
-            "error": "Empty JPEG"
+            "error": "No JPEG received"
         }), 400
 
-
-    # --------------------------------------------------------
-    # Basic JPEG validation
-    # JPEG starts with FF D8
-    # JPEG ends with FF D9
-    # --------------------------------------------------------
-
-    if not frame.startswith(b"\xff\xd8"):
-
-        return jsonify({
-            "error": "Invalid JPEG data"
-        }), 400
-
-
-    # --------------------------------------------------------
-    # Store ONLY newest frame
-    # --------------------------------------------------------
-
-    with frame_updated:
+    # Store newest JPEG
+    with frame_lock:
 
         latest_frame = frame
 
-        frame_number += 1
-
-        frame_updated.notify_all()
-
-
     return jsonify({
         "status": "received",
-        "frame": frame_number,
         "bytes": len(frame)
     })
 
 
 # ============================================================
-# MJPEG STREAM
+# VIDEO STREAM
 # ============================================================
 
-@app.route("/stream", methods=["GET"])
+@app.route("/stream")
 def stream():
 
     def generate():
 
-        last_frame_number = -1
-
         while True:
 
-            # ------------------------------------------------
-            # Wait for a NEW frame
-            # ------------------------------------------------
-
-            with frame_updated:
-
-                while (
-                    latest_frame is None
-                    or frame_number == last_frame_number
-                ):
-
-                    frame_updated.wait(
-                        timeout=1.0
-                    )
-
-                    # Continue checking
-                    # if no frame arrived
-
+            # Get newest JPEG
+            with frame_lock:
 
                 frame = latest_frame
 
-                current_number = frame_number
-
-
-            # ------------------------------------------------
-            # Send frame
-            # ------------------------------------------------
-
+            # Wait until YOLO sends a frame
             if frame is None:
+
+                time.sleep(0.02)
+
                 continue
 
-
-            last_frame_number = current_number
-
+            # ------------------------------------------------
+            # MJPEG FRAME
+            # ------------------------------------------------
 
             yield (
                 b"--frame\r\n"
                 b"Content-Type: image/jpeg\r\n"
-                b"Cache-Control: no-cache\r\n"
                 b"Content-Length: "
                 + str(len(frame)).encode()
                 + b"\r\n\r\n"
@@ -191,11 +126,12 @@ def stream():
                 + b"\r\n"
             )
 
+            # Prevent excessive CPU usage
+            time.sleep(0.03)
 
-    response = Response(
 
+    return Response(
         generate(),
-
         mimetype=(
             "multipart/x-mixed-replace; "
             "boundary=frame"
@@ -203,40 +139,25 @@ def stream():
     )
 
 
-    # --------------------------------------------------------
-    # Streaming headers
-    # --------------------------------------------------------
-
-    response.headers["Cache-Control"] = (
-        "no-cache, no-store, must-revalidate"
-    )
-
-    response.headers["Pragma"] = "no-cache"
-
-    response.headers["Expires"] = "0"
-
-    response.headers["Access-Control-Allow-Origin"] = "*"
-
-    response.headers["X-Accel-Buffering"] = "no"
-
-
-    return response
-
-
 # ============================================================
-# OPTIONAL: STOP STREAM CLIENTS CLEANLY
+# HEALTH
 # ============================================================
 
-@app.errorhandler(500)
-def server_error(error):
+@app.route("/health")
+def health():
+
+    with frame_lock:
+
+        online = latest_frame is not None
 
     return jsonify({
-        "error": "Internal server error"
-    }), 500
+        "status": "online",
+        "frame_available": online
+    })
 
 
 # ============================================================
-# LOCAL DEVELOPMENT ONLY
+# RUN
 # ============================================================
 
 if __name__ == "__main__":
@@ -248,23 +169,22 @@ if __name__ == "__main__":
         )
     )
 
-    print()
-    print("========================================")
+    print("=" * 50)
     print("SENTRY STREAM SERVER")
-    print("========================================")
+    print("=" * 50)
+
     print()
-    print(f"Port: {port}")
-    print()
-    print("Upload:")
-    print("/frame")
+    print(f"Running on port {port}")
+
     print()
     print("Stream:")
     print("/stream")
+
     print()
-    print("Health:")
-    print("/health")
-    print()
-    print("========================================")
+    print("JPEG upload:")
+    print("/frame")
+
+    print("=" * 50)
 
     app.run(
         host="0.0.0.0",
