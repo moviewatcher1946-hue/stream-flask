@@ -21,7 +21,7 @@ def stream():
     )
 
     return Response(
-        r.iter_content(chunk_size=640),
+        r.iter_content(chunk_size=240),
         content_type="multipart/x-mixed-replace; boundary=frame"
     )
 
