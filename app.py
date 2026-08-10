@@ -5,7 +5,7 @@ import os
 
 app = Flask(__name__)
 
-SOURCE = "http://127.0.0.1:8080/stream"
+SOURCE = "https://breath-eatery-sequester.ngrok-free.dev/stream"
 
 session = requests.Session()
 session.headers["ngrok-skip-browser-warning"] = "true"
