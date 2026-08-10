@@ -1,4 +1,4 @@
-```python
+
 from flask import Flask, Response, jsonify
 from flask_cors import CORS
 import requests
@@ -344,4 +344,3 @@ if __name__ == "__main__":
         debug=False
 
     )
-```
